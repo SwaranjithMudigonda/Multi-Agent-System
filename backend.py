@@ -13,6 +13,7 @@ import asyncio
 import json
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import Command, interrupt
@@ -22,8 +23,6 @@ from langchain_core.messages import (
     AIMessage,
     SystemMessage,
 )
-from langchain_groq import ChatGroq
-
 
 from mcp_client import (
     tavily_mcp_search,
@@ -51,17 +50,30 @@ def get_database_url():
 
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing. Please add it to your .env file.")
+llm_groq = None
+if GROQ_API_KEY:
+    from langchain_groq import ChatGroq
+    llm_groq = ChatGroq(
+        model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        api_key=GROQ_API_KEY,
+    )
 
-# =========================
-# LLM - original model kept
-# =========================
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=GROQ_API_KEY,
-)
+llm_gemini = None
+if GEMINI_API_KEY:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm_gemini = ChatGoogleGenerativeAI(
+        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+        api_key=GEMINI_API_KEY,
+    )
+
+# Use Groq by default for high throughput; fallback to Gemini if needed
+llm = llm_groq or llm_gemini
+if llm is None:
+    raise ValueError("Neither GROQ_API_KEY nor GEMINI_API_KEY found in .env")
+
+
 
 # =========================
 # State - original fields kept, new control fields added
@@ -113,14 +125,37 @@ AGENT_ORDER = [
 ]
 
 
+def _extract_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, dict) and "text" in part:
+                texts.append(part["text"])
+            elif isinstance(part, str):
+                texts.append(part)
+        return "".join(texts)
+    return str(content)
+
+
 def _llm_text(system_prompt: str, user_prompt: str) -> str:
-    response = llm.invoke(
-        [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
-    )
-    return str(response.content)
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    try:
+        response = llm.invoke(messages)
+        return _extract_text(response.content)
+    except Exception as exc:
+        alternate = llm_gemini if llm == llm_groq else llm_groq
+        if alternate is not None:
+            print(f"Primary LLM error ({exc}), switching to alternate model...", flush=True)
+            response = alternate.invoke(messages)
+            return _extract_text(response.content)
+        raise exc
+
+
 
 
 def _json_from_llm(text: str) -> dict[str, Any]:
@@ -342,9 +377,10 @@ def flight_agent(state: TravelState):
                 HumanMessage(content=prompt),
             ]
         )
-        flight_data = response.content
+        flight_data = _extract_text(response.content)
     except Exception as exc:
         flight_data = f"Flight information unavailable: {exc}"
+
 
     return {
         "flight_results": flight_data,
@@ -398,11 +434,12 @@ def hotel_agent(state: TravelState):
 # Weather Agent - original behavior kept
 # =========================
 def weather_agent(state: TravelState):
-    city = extract_destination(
-        state["user_query"]
-    )
-
+    city = state.get("trip_constraints", {}).get("destination") or "the destination"
     try:
+        city = extract_destination(
+            state["user_query"]
+        )
+
         weather_data = asyncio.run(
             weather_mcp_search(city)
         )
@@ -432,6 +469,7 @@ Forecast:
             "seasonal guidance and advise the traveler "
             "to verify the forecast before departure."
         )
+
 
     return {
         "weather_results": weather_results,
@@ -482,7 +520,7 @@ If exact live prices are unavailable, clearly label estimates as approximate.
     )
 
     return {
-        "budget_results": response.content,
+        "budget_results": _extract_text(response.content),
         "messages": [AIMessage(content="Budget assessment generated.")],
         "llm_calls": state.get("llm_calls", 0) + 1,
     }
@@ -530,11 +568,12 @@ Create a clear draft that is ready for human review.
     )
 
     return {
-        "itinerary": response.content,
+        "itinerary": _extract_text(response.content),
         "approval_request": approval_request,
         "messages": [AIMessage(content="Draft itinerary created for human review.")],
         "llm_calls": state.get("llm_calls", 0) + 1,
     }
+
 
 
 # =========================
@@ -569,45 +608,62 @@ def human_approval_agent(state: TravelState):
 # =========================
 # Final Response Agent - original format kept, HITL feedback added
 # =========================
+# Final Synthesizer Agent
+# =========================
 def final_agent(state: TravelState):
-    if state.get("approved", False):
-        review_instruction = (
-            "The user approved the draft. Preserve its decisions while polishing it."
-        )
-    else:
-        review_instruction = f"""
-The user requested a revision. Apply this feedback carefully:
-{state.get('human_feedback', '') or 'Improve the draft before finalizing it.'}
-"""
+    approved = state.get("approved", False)
+    feedback = state.get("human_feedback", "").strip()
+
+    # If the user approved without revision comments, the draft itinerary is already synthesized
+    if approved and not feedback:
+        draft = state.get("itinerary", "")
+        if draft:
+            return {
+                "final_response": draft,
+                "messages": [AIMessage(content=draft)],
+                "llm_calls": state.get("llm_calls", 0),
+            }
+
+    review_instruction = (
+        f"The user requested a revision. Apply this feedback carefully:\n{feedback}"
+        if feedback
+        else "The user approved the draft. Provide a polished, final version."
+    )
+
+    flight_snip = (state.get("flight_results") or "")[:1000]
+    hotel_snip = (state.get("hotel_results") or "")[:1000]
+    weather_snip = (state.get("weather_results") or "")[:600]
+    budget_snip = (state.get("budget_results") or "")[:800]
+    draft_snip = (state.get("itinerary") or "")[:1500]
 
     final_prompt = f"""
-Generate the final travel response for the user.
+Generate the final polished travel response.
 
-Human Review:
+Human Review Instruction:
 {review_instruction}
 
 User Request:
-{state['user_query']}
+{state.get('user_query', '')}
 
 Supervisor Constraints:
 {state.get('trip_constraints', {})}
 
-Flights:
-{state.get('flight_results', '')}
+Key Flight Findings:
+{flight_snip}
 
-Hotels:
-{state.get('hotel_results', '')}
+Key Hotel Suggestions:
+{hotel_snip}
 
-Weather:
-{state.get('weather_results', '')}
+Weather Outlook:
+{weather_snip}
 
-Budget Analysis:
-{state.get('budget_results', '')}
+Budget Breakdown:
+{budget_snip}
 
 Draft Itinerary:
-{state.get('itinerary', '')}
+{draft_snip}
 
-Format the final answer beautifully using these sections:
+Format the final response cleanly:
 1. Trip Summary
 2. Flight Information
 3. Hotel Suggestions
@@ -615,29 +671,23 @@ Format the final answer beautifully using these sections:
 5. Day-by-Day Itinerary
 6. Estimated Budget
 7. Final Recommendations
-
-Important:
-- Be clear and practical.
-- Mention that live flight APIs may not provide ticket prices when pricing is unavailable.
-- Include weather-based travel advice.
-- Keep the response useful for real travel planning.
-- Incorporate the human feedback when revision was requested.
 """
 
-    response = llm.invoke(
-        [
-            SystemMessage(
-                content="You are a professional AI travel booking assistant."
-            ),
-            HumanMessage(content=final_prompt),
-        ]
-    )
+    try:
+        final_text = _llm_text(
+            "You are a professional AI travel booking assistant.",
+            final_prompt,
+        )
+    except Exception as exc:
+        print(f"[final_agent] LLM synthesis failed ({exc}), falling back to draft itinerary", flush=True)
+        final_text = state.get("itinerary", "")
 
     return {
-        "final_response": response.content,
-        "messages": [response],
+        "final_response": final_text,
+        "messages": [AIMessage(content=final_text)],
         "llm_calls": state.get("llm_calls", 0) + 1,
     }
+
 
 
 # =========================
@@ -720,15 +770,25 @@ graph.add_edge("guardrail_blocked", END)
 # PostgreSQL Checkpointer - original persistence kept
 # =========================
 DATABASE_URL = get_database_url()
-_conn = psycopg.connect(
+
+pool = ConnectionPool(
     DATABASE_URL,
-    autocommit=True,
-    row_factory=dict_row,
+    min_size=1,
+    max_size=10,
+    max_idle=60.0,
+    max_lifetime=300.0,
+    kwargs={
+        "autocommit": True,
+        "row_factory": dict_row,
+    },
+    check=ConnectionPool.check_connection,
 )
-checkpointer = PostgresSaver(_conn)
+
+checkpointer = PostgresSaver(pool)
 checkpointer.setup()
 
 travel_graph = graph.compile(checkpointer=checkpointer)
+
 
 
 # =========================
@@ -749,33 +809,35 @@ def _serialize_result(
     thread_id: str,
 ) -> dict[str, Any]:
     messages = result.get("messages", [])
-    last_message = messages[-1].content if messages else ""
-    answer = result.get("final_response") or last_message
+    last_message = _extract_text(messages[-1].content) if messages else ""
+    answer = _extract_text(result.get("final_response") or last_message)
     interrupt_payload = _interrupt_payload(result)
 
     if interrupt_payload:
-        answer = interrupt_payload.get("draft_itinerary") or result.get(
-            "itinerary", ""
+        answer = _extract_text(
+            interrupt_payload.get("draft_itinerary")
+            or result.get("itinerary", "")
         )
 
     return {
         "thread_id": thread_id,
         "answer": answer,
         "requires_approval": interrupt_payload is not None,
-        "approval_request": (
+        "approval_request": _extract_text(
             interrupt_payload.get("approval_request", "")
             if interrupt_payload
             else result.get("approval_request", "")
         ),
-        "flight_results": result.get("flight_results", ""),
-        "hotel_results": result.get("hotel_results", ""),
-        "weather_results": result.get("weather_results", ""),
-        "budget_results": result.get("budget_results", ""),
-        "itinerary": (
+        "flight_results": _extract_text(result.get("flight_results", "")),
+        "hotel_results": _extract_text(result.get("hotel_results", "")),
+        "weather_results": _extract_text(result.get("weather_results", "")),
+        "budget_results": _extract_text(result.get("budget_results", "")),
+        "itinerary": _extract_text(
             interrupt_payload.get("draft_itinerary", "")
             if interrupt_payload
             else result.get("itinerary", "")
         ),
+
         "selected_agents": result.get("selected_agents", []),
         "trip_constraints": result.get("trip_constraints", {}),
         "supervisor_reasoning": result.get("supervisor_reasoning", ""),

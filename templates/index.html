@@ -69,13 +69,78 @@
     <section id="workflowSection" class="workflow-section hidden">
       <div class="workflow-header">
         <div>
-          <span class="eyebrow">Supervisor Agent</span>
-          <h2>Execution Plan</h2>
+          <span class="eyebrow">LangGraph Multi-Agent System</span>
+          <h2>Agent Pipeline Tracker</h2>
         </div>
         <span id="guardrailBadge" class="guardrail-badge">Guardrail passed</span>
       </div>
-      <p id="supervisorReasoning" class="supervisor-reasoning"></p>
-      <div id="agentChips" class="agent-chips"></div>
+
+      <!-- Step-by-Step Pipeline Flow Stepper -->
+      <div class="pipeline-flow">
+        <div class="flow-step" id="stepGuardrail">
+          <div class="step-icon-wrap">🛡️</div>
+          <div class="step-details">
+            <span class="step-title">Guardrail</span>
+            <span class="step-badge" id="stepGuardrailStatus">Passed</span>
+          </div>
+        </div>
+
+        <div class="flow-connector active"></div>
+
+        <div class="flow-step" id="stepSupervisor">
+          <div class="step-icon-wrap">🧠</div>
+          <div class="step-details">
+            <span class="step-title">Supervisor</span>
+            <span class="step-badge" id="stepSupervisorStatus">Routed</span>
+          </div>
+        </div>
+
+        <div class="flow-connector active"></div>
+
+        <div class="flow-step" id="stepSpecialists">
+          <div class="step-icon-wrap">⚙️</div>
+          <div class="step-details">
+            <span class="step-title">MCP Specialists</span>
+            <span class="step-badge" id="stepSpecialistsStatus">Executed</span>
+          </div>
+        </div>
+
+        <div class="flow-connector active"></div>
+
+        <div class="flow-step" id="stepItinerary">
+          <div class="step-icon-wrap">🗓️</div>
+          <div class="step-details">
+            <span class="step-title">Draft Plan</span>
+            <span class="step-badge" id="stepItineraryStatus">Synthesized</span>
+          </div>
+        </div>
+
+        <div class="flow-connector" id="connectorHitl"></div>
+
+        <div class="flow-step" id="stepHitl">
+          <div class="step-icon-wrap">👤</div>
+          <div class="step-details">
+            <span class="step-title">HITL Review</span>
+            <span class="step-badge" id="stepHitlStatus">Reviewing</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Supervisor Reasoning & Extracted Constraints Card -->
+      <div class="pipeline-insight-card">
+        <div class="insight-header">
+          <span class="insight-icon">💡</span>
+          <h3>Supervisor Reasoning & Extracted Parameters</h3>
+        </div>
+        <p id="supervisorReasoning" class="supervisor-reasoning"></p>
+        <div id="tripConstraints" class="trip-constraints-wrap"></div>
+      </div>
+
+      <!-- Active Specialist Agents Execution Cards -->
+      <div class="specialists-section-wrap">
+        <h3 class="specialists-heading">Invoked Specialist Agents & MCP Adapters</h3>
+        <div id="specialistCardsGrid" class="specialist-grid"></div>
+      </div>
     </section>
 
     <section id="resultSection" class="result-section hidden">

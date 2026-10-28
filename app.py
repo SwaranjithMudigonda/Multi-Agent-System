@@ -3,15 +3,12 @@ import traceback
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from backend import run_travel_agent, resume_travel_agent
 
-# This is kept from the original project to allow the existing synchronous
-# agent functions to call async MCP helpers inside FastAPI.
 import nest_asyncio
 
 nest_asyncio.apply()
@@ -27,11 +24,26 @@ app = FastAPI(
     version="2.0.0",
 )
 
-app.mount(
-    "/static",
-    StaticFiles(directory=str(BASE_DIR / "static")),
-    name="static",
-)
+@app.get("/static/{file_path:path}")
+async def serve_static(file_path: str):
+    target = (BASE_DIR / "static" / file_path).resolve()
+    static_dir = (BASE_DIR / "static").resolve()
+    if not str(target).startswith(str(static_dir)) or not target.is_file():
+        return Response(status_code=404, content="Not found")
+
+    content_types = {
+        ".css": "text/css",
+        ".js": "application/javascript",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
+    }
+    media_type = content_types.get(target.suffix.lower(), "application/octet-stream")
+    return Response(content=target.read_bytes(), media_type=media_type)
+
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 

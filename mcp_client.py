@@ -61,14 +61,29 @@ def _subprocess_env(**updates: str | None) -> dict[str, str]:
     return env
 
 
-# =========================================================
-# LLM
-# =========================================================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=_require_env("GROQ_API_KEY", GROQ_API_KEY),
-)
+llm_groq = None
+if GROQ_API_KEY:
+    from langchain_groq import ChatGroq
+    llm_groq = ChatGroq(
+        model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        api_key=GROQ_API_KEY,
+    )
+
+llm_gemini = None
+if GEMINI_API_KEY:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm_gemini = ChatGoogleGenerativeAI(
+        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+        api_key=GEMINI_API_KEY,
+    )
+
+llm = llm_groq or llm_gemini
+if llm is None:
+    raise RuntimeError("Neither GROQ_API_KEY nor GEMINI_API_KEY is set in .env")
+
+
 
 
 # =========================================================
@@ -308,11 +323,25 @@ Return only the destination name.
 Do not add any explanation.
 """
 
-    response = llm.invoke(prompt)
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:
+        alternate = llm_gemini if llm == llm_groq else llm_groq
+        if alternate is not None:
+            response = alternate.invoke(prompt)
+        else:
+            raise exc
 
-    destination = str(
-        response.content
-    ).strip()
+    content = response.content
+    if isinstance(content, list):
+        destination = "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p)
+            for p in content
+        ).strip()
+    else:
+        destination = str(content).strip()
+
+
 
     if not destination:
         raise ValueError(

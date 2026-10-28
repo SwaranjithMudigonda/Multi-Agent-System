@@ -48,39 +48,186 @@ function hideError() {
 }
 
 function renderMarkdown(element, markdown) {
-  if (typeof marked !== "undefined") {
-    element.innerHTML = marked.parse(markdown || "");
+  let content = "";
+  if (Array.isArray(markdown)) {
+    content = markdown
+      .map((part) => {
+        if (typeof part === "object" && part !== null) {
+          return part.text || part.content || "";
+        }
+        return String(part || "");
+      })
+      .join("");
+  } else if (typeof markdown === "object" && markdown !== null) {
+    content = markdown.text || markdown.content || JSON.stringify(markdown);
   } else {
-    element.innerText = markdown || "";
+    content = String(markdown || "");
   }
+
+  if (typeof marked !== "undefined") {
+    try {
+      element.innerHTML = marked.parse(content);
+    } catch (e) {
+      element.innerText = content;
+    }
+  } else {
+    element.innerText = content;
+  }
+}
+
+
+const SPECIALIST_CONFIG = {
+  flight_agent: {
+    name: "Flight Agent",
+    icon: "✈️",
+    adapter: "AviationStack MCP (uvx)",
+    field: "flight_results",
+    desc: "Airports & flight route discovery"
+  },
+  hotel_agent: {
+    name: "Hotel Agent",
+    icon: "🏨",
+    adapter: "Tavily Search MCP",
+    field: "hotel_results",
+    desc: "Accommodation & neighborhood stays"
+  },
+  weather_agent: {
+    name: "Weather Agent",
+    icon: "🌦️",
+    adapter: "OpenWeather MCP",
+    field: "weather_results",
+    desc: "Live climate & forecast analytics"
+  },
+  budget_agent: {
+    name: "Budget Agent",
+    icon: "💰",
+    adapter: "Cost Analyst",
+    field: "budget_results",
+    desc: "Budget feasibility & affordability check"
+  },
+  itinerary_agent: {
+    name: "Itinerary Agent",
+    icon: "🗓️",
+    adapter: "LangGraph Synthesizer",
+    field: "itinerary",
+    desc: "Integrated multi-agent travel plan"
+  }
+};
+
+function toggleCardOutput(id) {
+  const content = document.getElementById(id);
+  if (!content) return;
+  content.classList.toggle("hidden");
 }
 
 function showWorkflow(data) {
   const section = document.getElementById("workflowSection");
   const reasoning = document.getElementById("supervisorReasoning");
-  const chips = document.getElementById("agentChips");
   const guardrailBadge = document.getElementById("guardrailBadge");
+  const constraintsWrap = document.getElementById("tripConstraints");
+  const cardsGrid = document.getElementById("specialistCardsGrid");
 
-  reasoning.textContent = data.supervisor_reasoning || "Supervisor routing completed.";
-  chips.innerHTML = "";
+  // 1. Guardrail Badge
+  if (data.guardrail_allowed === false) {
+    guardrailBadge.textContent = "Guardrail Blocked";
+    guardrailBadge.classList.add("blocked");
+    document.getElementById("stepGuardrailStatus").textContent = "Blocked";
+  } else {
+    guardrailBadge.textContent = "Guardrail Passed";
+    guardrailBadge.classList.remove("blocked");
+    document.getElementById("stepGuardrailStatus").textContent = "Passed";
+  }
 
-  (data.selected_agents || []).forEach((agent) => {
-    const chip = document.createElement("span");
-    chip.className = "agent-chip";
-    chip.textContent = AGENT_LABELS[agent] || agent;
-    chips.appendChild(chip);
+  // 2. Stepper Statuses
+  const selectedAgents = data.selected_agents || [];
+  document.getElementById("stepSpecialistsStatus").textContent = `${selectedAgents.length} Invoked`;
+
+  const hitlStatus = document.getElementById("stepHitlStatus");
+  const hitlConnector = document.getElementById("connectorHitl");
+  const stepHitl = document.getElementById("stepHitl");
+
+  if (data.requires_approval) {
+    hitlStatus.textContent = "Awaiting Review";
+    hitlStatus.className = "step-badge badge-warning";
+    hitlConnector.classList.add("active");
+    stepHitl.classList.add("active");
+  } else if (data.approved === true) {
+    hitlStatus.textContent = "Approved ✅";
+    hitlStatus.className = "step-badge badge-success";
+    hitlConnector.classList.add("active");
+    stepHitl.classList.add("active");
+  } else {
+    hitlStatus.textContent = "Completed";
+    hitlStatus.className = "step-badge";
+    hitlConnector.classList.add("active");
+    stepHitl.classList.add("active");
+  }
+
+  // 3. Supervisor Reasoning
+  reasoning.textContent = data.supervisor_reasoning || "Supervisor analyzed requirements and dispatched specialist agents.";
+
+  // 4. Trip Constraints Pills
+  constraintsWrap.innerHTML = "";
+  const constraints = data.trip_constraints || {};
+  const constraintIcons = {
+    destination: "📍 Destination",
+    origin: "🛫 Origin",
+    duration: "⏳ Duration",
+    budget: "💰 Budget",
+    travel_style: "🎒 Style"
+  };
+
+  Object.entries(constraints).forEach(([key, val]) => {
+    if (val && typeof val === "string" && val.trim() !== "") {
+      const pill = document.createElement("span");
+      pill.className = "constraint-pill";
+      const label = constraintIcons[key] || key;
+      pill.innerHTML = `<strong>${label}:</strong> ${val}`;
+      constraintsWrap.appendChild(pill);
+    }
   });
 
-  if (data.guardrail_allowed === false) {
-    guardrailBadge.textContent = "Guardrail blocked";
-    guardrailBadge.classList.add("blocked");
-  } else {
-    guardrailBadge.textContent = "Guardrail passed";
-    guardrailBadge.classList.remove("blocked");
-  }
+  // 5. Specialist Execution Cards Grid
+  cardsGrid.innerHTML = "";
+  selectedAgents.forEach((agentKey, index) => {
+    const config = SPECIALIST_CONFIG[agentKey] || {
+      name: agentKey,
+      icon: "⚙️",
+      adapter: "Agent Specialist",
+      field: "",
+      desc: "Specialist execution node"
+    };
+
+    const card = document.createElement("div");
+    card.className = "specialist-card";
+
+    const previewId = `specialist-output-${index}`;
+    const rawData = config.field && data[config.field] ? String(data[config.field]).trim() : "";
+
+    card.innerHTML = `
+      <div class="specialist-card-header">
+        <div class="specialist-icon-box">${config.icon}</div>
+        <div class="specialist-info">
+          <h4>${config.name}</h4>
+          <span class="mcp-adapter-pill">${config.adapter}</span>
+        </div>
+        <span class="status-indicator-dot"></span>
+      </div>
+      <p class="specialist-card-desc">${config.desc}</p>
+      ${rawData ? `
+        <button class="view-raw-btn" onclick="toggleCardOutput('${previewId}')">
+          <span>Peek Data</span> ▾
+        </button>
+        <div id="${previewId}" class="specialist-raw-output hidden">${rawData}</div>
+      ` : ""}
+    `;
+
+    cardsGrid.appendChild(card);
+  });
 
   section.classList.remove("hidden");
 }
+
 
 function showResult(answer, threadId, isDraft = false) {
   latestAnswerMarkdown = answer || "";
